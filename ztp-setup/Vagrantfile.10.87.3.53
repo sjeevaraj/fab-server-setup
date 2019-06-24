@@ -1,0 +1,159 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+require 'getoptlong'
+
+opts = GetoptLong.new(
+  [ '--tsn-ip', GetoptLong::OPTIONAL_ARGUMENT ],
+  [ '--contrail-ip', GetoptLong::OPTIONAL_ARGUMENT ],
+  [ '--command-ip', GetoptLong::OPTIONAL_ARGUMENT ],
+  [ '--netmask', GetoptLong::OPTIONAL_ARGUMENT ],
+  [ '--gateway', GetoptLong::OPTIONAL_ARGUMENT ],
+  [ '--vrouter-gateway', GetoptLong::OPTIONAL_ARGUMENT ],
+  [ '--control-node', GetoptLong::OPTIONAL_ARGUMENT ],
+  [ '--tsn-node', GetoptLong::OPTIONAL_ARGUMENT ]
+)
+
+tsn_ip = "10.87.13.59"
+contrail_ip = "10.87.13.60"
+command_ip = "10.87.13.61"
+netmask = "255.255.225.224"
+gateway = "10.87.13.62"
+vrouter_gateway = "20.1.1.1"
+control_node = "10.87.13.60"
+tsn_node = "10.87.13.59"
+
+opts.each do |opt, arg|
+  case opt
+    when '--tsn-ip'
+      tsn_ip=arg
+    when '--contrail-ip'
+      contrail_ip=arg
+    when '--command-ip'
+      command_ip=arg
+    when '--netmask'
+      netmask=arg
+    when '--gateway'
+      gateway=arg
+    when '--vrouter-gateway'
+      vrouter_gateway=arg
+    when '--control-node'
+      control_node=arg
+    when '--tsn-node'
+      tsn_node=arg
+  end
+end
+
+vagrant_root = File.dirname(__FILE__)
+contrail_version = "master-768"
+eth0_file = "/etc/sysconfig/network-scripts/ifcfg-eth0"
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "qarham/CentOS7.5-350GB"
+  config.vbguest.auto_update = false
+
+  config.vm.define "tsn" do |m|
+    m.vm.hostname = "tsn"
+    m.vm.provider "virtualbox" do |v|
+      v.memory = 8192
+      v.cpus = 2
+    end
+
+    m.vm.provision "shell", run: "always", inline: "sed -i 's/DEFROUTE=yes/DEFROUTE=no/g' #{eth0_file}"
+    m.vm.network "public_network", auto_config: false, bridge: "eno2"
+
+    m.vm.provision :ansible do |ansible|
+      ansible.playbook = "#{vagrant_root}/ansible/network.yml"
+      ansible.extra_vars = {
+          vm_interface: "eth1",
+          vm_gateway_ip: gateway,
+          vm_ip: tsn_ip,
+          vm_netmask: netmask,
+          vm_dns1: "10.84.5.101",
+          vm_dns2: "172.21.200.60",
+          vm_domain: "contrail.juniper.net englab.juniper.net jnpr.net juniper.net"
+      }
+    end
+
+    m.vm.provision :ansible do |ansible|
+      ansible.playbook = "#{vagrant_root}/ansible/setup.yml"
+      ansible.extra_vars = {
+        set_root_pass: "contrail",
+      }
+    end
+  end
+
+  config.vm.define "contrail" do |m|
+    m.vm.hostname = "contrail"
+    m.vm.provider "virtualbox" do |v|
+      v.memory = 48000
+      v.cpus = 8
+    end
+
+    m.vm.provision "shell", run: "always", inline: "sed -i 's/DEFROUTE=yes/DEFROUTE=no/g' #{eth0_file}"
+    m.vm.network "public_network", auto_config: false, bridge: "eno2"
+
+    m.vm.provision :ansible do |ansible|
+      ansible.playbook = "#{vagrant_root}/ansible/ztp.yml"
+      ansible.extra_vars = {
+          vm_interface: "eth1",
+          vm_gateway_ip: gateway,
+          vm_ip: contrail_ip,
+          vm_netmask: netmask,
+          vm_dns1: "10.84.5.101",
+          vm_dns2: "172.21.200.60",
+          vm_domain: "contrail.juniper.net englab.juniper.net jnpr.net juniper.net",
+          ntp_server: "ntp.juniper.net",
+          contrail_version: contrail_version,
+          vagrant_root: vagrant_root,
+          tsn_ip: tsn_ip,
+          vrouter_gateway: vrouter_gateway,
+          control_node: control_node,
+          tsn_node: tsn_node
+      }
+    end
+
+    m.vm.provision "file", source: "#{vagrant_root}/ansible/scripts/all.sh", destination: "/tmp/all.sh"
+    m.vm.provision "shell", inline: "chmod +x /tmp/all.sh"
+    m.vm.provision "shell", inline: "/tmp/all.sh"
+  end
+
+  config.vm.define "command" do |cc|
+    cc.vm.hostname = "command"
+    cc.vm.provider "virtualbox" do |v|
+      v.memory = 4000
+      v.cpus = 2
+    end
+
+    cc.vm.network "public_network", auto_config: false, bridge: "eno2"
+
+    cc.vm.provision "shell", run: "always", inline: "sed -i 's/DEFROUTE=yes/DEFROUTE=no/g' #{eth0_file}"
+    cc.vm.provision :ansible do |ansible|
+      ansible.playbook = "#{vagrant_root}/ansible/ui.yml"
+      ansible.extra_vars = {
+          vm_interface: "eth1",
+          vm_gateway_ip: gateway,
+          vm_ip: command_ip,
+          vm_netmask: netmask,
+          vm_dns1: "10.84.5.101",
+          vm_dns2: "172.21.200.60",
+          vm_domain: "contrail.juniper.net englab.juniper.net jnpr.net juniper.net",
+          ntp_server: "ntp.juniper.net",
+          contrail_version: contrail_version,
+          vagrant_root: vagrant_root
+      }
+    end
+    cc.vm.provision "shell", inline: "> /etc/profile.d/myvars.sh"
+    cc.vm.provision "shell", inline: "echo 'export CCD_IMAGE=ci-repo.englab.juniper.net:5010/contrail-command-deployer:#{contrail_version}' >> /etc/profile.d/myvars.sh"
+    cc.vm.provision "shell", inline: "echo 'export COMMAND_SERVERS_FILE=/tmp/command_servers.yml' >> /etc/profile.d/myvars.sh"
+    cc.vm.provision "shell", inline: "echo 'export INSTANCES_FILE=/tmp/instances.yml' >> /etc/profile.d/myvars.sh"
+
+    cc.vm.provision "file", source: "config/command_servers.yml", destination: "/tmp/command_servers.yml"
+    cc.vm.provision "file", source: "config/instances.yml", destination: "/tmp/instances.yml"
+
+    cc.vm.provision "shell", path: "#{vagrant_root}/ansible/scripts/docker.sh"
+    cc.vm.provision "file", source: "#{vagrant_root}/ansible/scripts/cc.sh", destination: "/tmp/cc.sh"
+    cc.vm.provision "shell", inline: "chmod +x /tmp/cc.sh"
+    cc.vm.provision "shell", inline: "/tmp/cc.sh"
+  end
+end
